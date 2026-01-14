@@ -162,63 +162,68 @@ or
    :filter #'chatgpt-shell-minimax--extract-response
    :shell shell))
 
-(defun chatgpt-shell-minimax--extract-response (output)
+(cl-defun chatgpt-shell-minimax--extract-response (output)
   "Extract visible assistant text from MiniMax response.
-OUTPUT is an alist like (:pending . \"response string\") from shell-maker.
-Handles both streaming SSE and non-streaming full JSON."
+Works for:
+- Streaming: (:pending . \"accumulated SSE string\")
+- Non-streaming: plain string (full JSON)"
   (message "Filter received: type=%s pending-length=%d" (type-of output) (length (cdr-safe output)))
-  ;; Extract the real string value
-  (let ((response-str (if (and (consp output) (eq (car output) :pending))
-                          (cdr output)
-                        (if (stringp output) output ""))))  ; fallback if passed directly
+  (let ((response-str
+         (cond
+          ;; Streaming mode: wrapped in (:pending . ...)
+          ((and (consp output) (eq (car output) :pending))
+           (or (cdr output) ""))
 
-    (if (string-empty-p response-str)
-        ""  ; nothing yet
+          ;; Non-streaming mode: raw string
+          ((stringp output)
+           output)
 
-      ;; Detect mode
-      (if (string-match-p "event:" response-str)  ; Streaming: SSE format
-          (let ((text "")
-                (lines (split-string response-str "\n" t)))
-            (dolist (line lines)
-              (when (string-prefix-p "data: " line)
-                (let* ((data-str (substring line 6))
-                       (json (ignore-errors (json-parse-string data-str t t))))
-                  (when (hash-table-p json)
-                    (let ((event-type (gethash "type" json)))
-                      (pcase event-type
-                        ("content_block_delta"
-                         (when-let ((delta (gethash "delta" json)))
-                           (let ((delta-type (gethash "type" delta)))
-                             (pcase delta-type
-                               ("text_delta"
-                                (setq text (concat text (or (gethash "text" delta "") ""))))
-                               ;; Skip MiniMax-specific
-                               ("thinking_delta" nil)
-                               ("signature_delta" nil)
-                               (_ nil)))))
-                        (_ nil))))))
-              (if (string-empty-p text) "" text))
+          ;; Fallback / unexpected case
+          (t ""))))
 
-            ;; Non-streaming: single full JSON message
+    (when (string-empty-p response-str)
+      (cl-return-from chatgpt-shell-minimax--extract-response ""))
+
+    ;; Streaming mode detection (SSE lines)
+    (if (string-match-p "^event:" response-str)
+        (let ((new-text "")
+              (lines (split-string response-str "\n" t)))
+          (dolist (line lines)
+            (when (string-prefix-p "data: " line)
+              (let* ((data (substring line 6))
+                     (json (ignore-errors (json-parse-string data t t))))
+                (when (hash-table-p json)
+                  (let ((type (gethash "type" json)))
+                    (pcase type
+                      ("content_block_delta"
+                       (when-let ((delta (gethash "delta" json)))
+                         (let ((delta-type (gethash "type" delta)))
+                           (pcase delta-type
+                             ("text_delta"
+                              (setq new-text (concat new-text (gethash "text" delta ""))))
+                             ("thinking_delta" nil)
+                             ("signature_delta" nil)))))))))
+              new-text)
+
+            ;; Non-streaming: full JSON response
             (let ((json (ignore-errors (json-parse-string response-str t t))))
               (when (hash-table-p json)
-                (when-let ((content-array (gethash "content" json)))
-                  (when (arrayp content-array)
-                    (let ((visible-text ""))
-                      (dotimes (i (length content-array))
-                        (let ((block (aref content-array i)))
-                          (when (hash-table-p block)
-                            (let ((block-type (gethash "type" block)))
-                              (pcase block-type
-                                ("text"
-                                 (setq visible-text (concat visible-text (or (gethash "text" block "") ""))))
-                                ;; Skip thinking
-                                ("thinking" nil)
-                                (_ nil))))))
-                      (if (string-empty-p visible-text) "" visible-text))))))
+                (when-let ((content (gethash "content" json)))
+                  (cond
+                   ((arrayp content)
+                    (let ((txt ""))
+                      (dotimes (i (length content))
+                        (let ((block (aref content i)))
+                          (when (and (hash-table-p block)
+                                     (string= (gethash "type" block) "text"))
+                            (setq txt (concat txt (or (gethash "text" block) ""))))))
+                      txt))
+                   ((stringp content)
+                    content)
+                   (t ""))))))
 
-            ;; Fallback: just return raw if nothing parsed
-            response-str)))))
+          ;; Ultimate fallback
+          ""))))
 
 (provide 'chatgpt-shell-minimax)
 ;;; chatgpt-shell-minimax.el ends here
