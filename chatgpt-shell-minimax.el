@@ -183,9 +183,11 @@ Returns only the new text to append (string or \"\")."
           (dolist (line lines)
             (when (string-prefix-p "data: " line)
               (let* ((data-str (substring line 6))
-                     (json (ignore-errors (json-parse-string data-str t t))))
+                     (json (ignore-errors (json-parse-string data-str))))
                 (when (and json (hash-table-p json))
                   (let ((event-type (gethash "type" json)))
+                    (message (concat "processing: " event-type))
+
                     (pcase event-type
                       ("content_block_delta"
                        (when-let ((delta (gethash "delta" json)))
@@ -202,7 +204,7 @@ Returns only the new text to append (string or \"\")."
           new-text)  ; Return only what was new in this call
 
       ;; Non-streaming fallback (full JSON string)
-      (let ((json (ignore-errors (json-parse-string pending-str t t))))
+      (let ((json (ignore-errors (json-parse-string pending-str))))
         (when (and json (hash-table-p json))
           (when-let ((content (gethash "content" json)))
             (cond
