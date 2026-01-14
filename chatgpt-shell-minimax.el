@@ -162,6 +162,25 @@ or
    :filter #'chatgpt-shell-minimax--extract-response
    :shell shell))
 
+(defmacro json-get (json &rest keys)
+  "Navigate JSON structure with KEYS."
+  (let ((result json))
+    (dolist (key keys)
+      (setq result
+            (cond
+             ((numberp key)
+              `(nth ,key ,result))
+             ((and (listp key)
+                   (eq (car key) 'quote)
+                   (consp (cadr key)))
+              (let ((k (cadr key)))
+                `(seq-find (lambda (item)
+                             (equal (gethash ,(symbol-name (car k)) item) ,(cdr k)))
+                           ,result)))
+             (t
+              `(gethash ,key ,result)))))
+    result))
+
 (cl-defun chatgpt-shell-minimax--extract-response (output)
   "Extract new visible text delta from MiniMax response.
 OUTPUT is (:pending . \"accumulated SSE\") in streaming."
@@ -209,9 +228,10 @@ OUTPUT is (:pending . \"accumulated SSE\") in streaming."
                                      :array-type  'list)))
 
         (when (hash-table-p json)
-          (when-let* ((content (gethash "content" json))
-                      (text (gethash "text" content)))
+          (when-let* ((text (json-get json "content" '(type . "text") "text")))
             (cond
+             ((stringp text)
+              text)
              ((listp text)  ; array-type 'list
               (let ((txt ""))
                 (dotimes (i (length text))
@@ -220,9 +240,7 @@ OUTPUT is (:pending . \"accumulated SSE\") in streaming."
                                (string= (gethash "type" block) "text"))
                       (setq txt (concat txt (or (gethash "text" block) ""))))))
                 txt))
-             (t ""))))))
-
-    ""))
+             (t ""))))))))
 
 (provide 'chatgpt-shell-minimax)
 ;;; chatgpt-shell-minimax.el ends here
