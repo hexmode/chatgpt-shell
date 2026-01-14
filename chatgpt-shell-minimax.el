@@ -163,67 +163,60 @@ or
    :shell shell))
 
 (cl-defun chatgpt-shell-minimax--extract-response (output)
-  "Extract visible assistant text from MiniMax response.
-Works for:
-- Streaming: (:pending . \"accumulated SSE string\")
-- Non-streaming: plain string (full JSON)"
-  (message "Filter received: type=%s pending-length=%d" (type-of output) (length (cdr-safe output)))
-  (let ((response-str
-         (cond
-          ;; Streaming mode: wrapped in (:pending . ...)
-          ((and (consp output) (eq (car output) :pending))
-           (or (cdr output) ""))
+  "Extract new visible text delta from MiniMax Anthropic-compatible response.
+OUTPUT is (:pending . \"accumulated SSE string\") in streaming mode.
+Returns only the new text to append (string or \"\")."
+  (let ((pending-str (cond
+                      ((and (consp output) (eq (caar output) :pending))
+                       (cdar output))
+                      ((stringp output)
+                       output)
+                      (t ""))))
 
-          ;; Non-streaming mode: raw string
-          ((stringp output)
-           output)
-
-          ;; Fallback / unexpected case
-          (t ""))))
-
-    (when (string-empty-p response-str)
+    (when (or (null pending-str) (string-empty-p pending-str))
       (cl-return-from chatgpt-shell-minimax--extract-response ""))
 
-    ;; Streaming mode detection (SSE lines)
-    (if (string-match-p "^event:" response-str)
+    ;; Detect SSE streaming
+    (if (string-match-p "event:" pending-str)
         (let ((new-text "")
-              (lines (split-string response-str "\n" t)))
+              (lines (split-string pending-str "\n" t)))
           (dolist (line lines)
             (when (string-prefix-p "data: " line)
-              (let* ((data (substring line 6))
-                     (json (ignore-errors (json-parse-string data t t))))
-                (when (hash-table-p json)
-                  (let ((type (gethash "type" json)))
-                    (pcase type
+              (let* ((data-str (substring line 6))
+                     (json (ignore-errors (json-parse-string data-str t t))))
+                (when (and json (hash-table-p json))
+                  (let ((event-type (gethash "type" json)))
+                    (pcase event-type
                       ("content_block_delta"
                        (when-let ((delta (gethash "delta" json)))
                          (let ((delta-type (gethash "type" delta)))
                            (pcase delta-type
                              ("text_delta"
-                              (setq new-text (concat new-text (gethash "text" delta ""))))
+                              (setq new-text (concat new-text (or (gethash "text" delta) ""))))
+                             ;; Explicitly skip MiniMax-specific deltas
                              ("thinking_delta" nil)
-                             ("signature_delta" nil)))))))))
-              new-text)
+                             ("signature_delta" nil)
+                             (_ nil))))))
+                      ;; Ignore other events (ping, message_start, etc.)
+                      (_ nil))))))
+          new-text)  ; Return only what was new in this call
 
-            ;; Non-streaming: full JSON response
-            (let ((json (ignore-errors (json-parse-string response-str t t))))
-              (when (hash-table-p json)
-                (when-let ((content (gethash "content" json)))
-                  (cond
-                   ((arrayp content)
-                    (let ((txt ""))
-                      (dotimes (i (length content))
-                        (let ((block (aref content i)))
-                          (when (and (hash-table-p block)
-                                     (string= (gethash "type" block) "text"))
-                            (setq txt (concat txt (or (gethash "text" block) ""))))))
-                      txt))
-                   ((stringp content)
-                    content)
-                   (t ""))))))
-
-          ;; Ultimate fallback
-          ""))))
+      ;; Non-streaming fallback (full JSON string)
+      (let ((json (ignore-errors (json-parse-string pending-str t t))))
+        (when (and json (hash-table-p json))
+          (when-let ((content (gethash "content" json)))
+            (cond
+             ((arrayp content)
+              (let ((txt ""))
+                (dotimes (i (length content))
+                  (let ((block (aref content i)))
+                    (when (and (hash-table-p block)
+                               (string= (gethash "type" block) "text"))
+                      (setq txt (concat txt (or (gethash "text" block) ""))))))
+                txt))
+             ((stringp content) content)
+             (t "")))))
+      "")))
 
 (provide 'chatgpt-shell-minimax)
 ;;; chatgpt-shell-minimax.el ends here
